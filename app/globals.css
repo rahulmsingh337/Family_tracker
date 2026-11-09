@@ -1,0 +1,27 @@
+:root{--bg:#f3f6f5;--ink:#14211f;--mute:#5b6b68;--line:#d5dedb;--accent:#0f766e;--warn:#b45309;--card:#fff}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1817;--ink:#e6efed;--mute:#93a5a1;--line:#263533;--accent:#2dd4bf;--warn:#f59e0b;--card:#16221f}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.center{min-height:100%;display:grid;place-items:center;padding:20px}
+.center-t{text-align:center}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:24px;width:min(380px,100%);display:flex;flex-direction:column;gap:12px}
+h1{font-size:20px;margin:0}h2{margin:0;font-size:18px}p{margin:0}
+input,select{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:9px 10px;width:100%}
+button{font:inherit;cursor:pointer;border:0;border-radius:6px;padding:10px 12px;background:var(--accent);color:#fff;font-weight:600}
+@media(prefers-color-scheme:dark){button{color:#06201c}}
+button.on{background:var(--warn);color:#fff}
+button.link{background:none;color:var(--mute);font-weight:400;padding:4px 6px;text-decoration:underline}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.warn{color:var(--warn)}.hint{color:var(--mute);font-size:13px}
+.app{display:grid;grid-template-columns:340px 1fr;height:100%}
+aside{padding:18px;display:flex;flex-direction:column;gap:12px;overflow-y:auto;border-right:1px solid var(--line);background:var(--card)}
+section{min-height:0}
+ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--line)}
+li div{display:flex;flex-direction:column}.acts{flex-direction:row;flex-wrap:wrap;justify-content:flex-end}
+li span{color:var(--mute);font-size:13px}
+.invite{display:flex;flex-direction:column;gap:8px;font-size:13px;color:var(--mute)}
+.invite code{word-break:break-all;background:var(--bg);padding:8px;border-radius:6px;color:var(--ink)}
+.row{display:flex;gap:8px;align-items:center}
+@media(max-width:720px){.app{grid-template-columns:1fr;grid-template-rows:55% 45%}aside{order:2;border-right:0;border-top:1px solid var(--line)}section{order:1}}

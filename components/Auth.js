@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
+import { auth } from '../lib/firebase';
 
 export default function Auth() {
   const [mode, setMode] = useState('in');
@@ -11,12 +12,12 @@ export default function Auth() {
   async function submit(e) {
     e.preventDefault();
     setMsg('');
-    const creds = { email, password };
-    const { data, error } = mode === 'in'
-      ? await supabase.auth.signInWithPassword(creds)
-      : await supabase.auth.signUp(creds);
-    if (error) setMsg(error.message);
-    else if (!data.session) setMsg('Check your email to confirm your address, then sign in.');
+    try {
+      if (mode === 'in') await signInWithEmailAndPassword(auth, email, password);
+      else await createUserWithEmailAndPassword(auth, email, password);
+    } catch (x) {
+      setMsg((x.code || x.message).replace('auth/', '').replace(/-/g, ' '));
+    }
   }
 
   return (

@@ -1,7 +1,12 @@
 'use client';
 import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import {
+  addDoc, arrayRemove, arrayUnion, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot,
+  orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc, where, writeBatch,
+} from 'firebase/firestore';
+import { signOut } from 'firebase/auth';
+import { auth, db } from '../lib/firebase';
 import { useSession } from '../lib/useSession';
 import Auth from '../components/Auth';
 
@@ -14,68 +19,67 @@ const ago = (t) => {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return `${Math.floor(s / 86400)} d ago`;
 };
-
 const dist = (a, b) => {
   const r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lng - a.lng) * r;
   const x = Math.sin(dLa / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) ** 2;
-  return 12742000 * Math.asin(Math.sqrt(x)); // metres
+  return 12742000 * Math.asin(Math.sqrt(x));
 };
+const newCode = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
 
 export default function Home() {
-  const session = useSession();
-  const uid = session?.user.id;
+  const user = useSession();
+  const uid = user?.uid;
   const [fams, setFams] = useState(null);
   const [fid, setFid] = useState(null);
+  const [famDoc, setFamDoc] = useState(null);
   const [members, setMembers] = useState([]);
   const [locs, setLocs] = useState({});
   const [form, setForm] = useState({ family: '', name: '' });
   const [err, setErr] = useState('');
-  const [code, setCode] = useState(null);
-  const lastSent = useRef(0);
-  const lastHist = useRef(null);
   const [trailUser, setTrailUser] = useState(null);
   const [range, setRange] = useState(24);
   const [trail, setTrail] = useState([]);
   const [awake, setAwake] = useState(false);
+  const lastSent = useRef(0);
+  const lastHist = useRef(null);
+  const famIds = useRef([]);
 
   const loadFams = useCallback(async () => {
-    const { data } = await supabase.from('members')
-      .select('family_id,name,families(name,invite_code,owner)').eq('user_id', uid);
-    setFams(data || []);
-    setFid((cur) => (data?.some((f) => f.family_id === cur) ? cur : data?.[0]?.family_id || null));
+    const u = await getDoc(doc(db, 'users', uid));
+    const out = [];
+    for (const id of u.exists() ? u.data().families || [] : []) {
+      try { const s = await getDoc(doc(db, 'families', id)); if (s.exists()) out.push({ id, name: s.data().name }); } catch {}
+    }
+    famIds.current = out.map((f) => f.id);
+    setFams(out);
+    setFid((cur) => (out.some((f) => f.id === cur) ? cur : out[0]?.id || null));
   }, [uid]);
-
-  const loadFamily = useCallback(async () => {
-    if (!fid) return;
-    const { data: ms } = await supabase.from('members').select('user_id,name,sharing').eq('family_id', fid);
-    setMembers(ms || []);
-    const { data: ls } = await supabase.from('locations').select('*').in('user_id', (ms || []).map((m) => m.user_id));
-    setLocs(Object.fromEntries((ls || []).map((l) => [l.user_id, l])));
-  }, [fid]);
 
   useEffect(() => { if (uid) loadFams(); }, [uid, loadFams]);
 
   useEffect(() => {
     if (!fid) return;
-    setCode(null);
-    loadFamily();
-    const ch = supabase.channel('fam-' + fid)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'locations' }, loadFamily)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'members', filter: `family_id=eq.${fid}` }, loadFamily)
-      .subscribe();
-    const t = setInterval(loadFamily, 60000); // refreshes "x min ago" + realtime fallback
-    return () => { supabase.removeChannel(ch); clearInterval(t); };
-  }, [fid, loadFamily]);
+    setTrailUser(null);
+    const f = doc(db, 'families', fid);
+    const off = [
+      onSnapshot(f, (s) => setFamDoc(s.exists() ? { id: s.id, ...s.data() } : null), () => loadFams()),
+      onSnapshot(collection(f, 'members'), (s) => setMembers(s.docs.map((d) => ({ uid: d.id, ...d.data() }))), () => loadFams()),
+      onSnapshot(query(collection(f, 'locs'), where('sharing', '==', true)),
+        (s) => setLocs(Object.fromEntries(s.docs.map((d) => [d.id, d.data({ serverTimestamps: 'estimate' })]))), () => {}),
+    ];
+    const t = setInterval(() => setMembers((m) => [...m]), 60000); // refresh "x min ago"
+    return () => { off.forEach((u) => u()); clearInterval(t); };
+  }, [fid, loadFams]);
 
-  const sharing = !!members.find((m) => m.user_id === uid)?.sharing;
+  const sharing = !!members.find((m) => m.uid === uid)?.sharing;
 
-  // Location push: only while the tab is open and sharing is on.
+  // Location push: only while the tab is open and sharing is on. Written to every family you belong to.
   useEffect(() => {
     if (!sharing || !uid) return;
     lastSent.current = 0;
     lastHist.current = null;
-    const push = (lat, lng, accuracy, source) =>
-      supabase.from('locations').upsert({ user_id: uid, lat, lng, accuracy, source, updated_at: new Date().toISOString() });
+    const push = (lat, lng, accuracy, source) => famIds.current.forEach((id) =>
+      setDoc(doc(db, 'families', id, 'locs', uid), { lat, lng, accuracy, source, sharing: true, updatedAt: serverTimestamp() }).catch(() => {}));
     const fallback = async () => {
       const j = await fetch('/api/ip-location').then((r) => r.json()).catch(() => ({}));
       if (j.lat) { push(j.lat, j.lng, null, 'ip'); setErr('GPS unavailable or denied. Showing an approximate (IP-based) position.'); }
@@ -92,7 +96,8 @@ export default function Home() {
         const h = lastHist.current; // history: one point per 50 m moved or 5 min
         if (!h || Date.now() - h.t > 300000 || dist(h, { lat: la, lng: lo }) > 50) {
           lastHist.current = { lat: la, lng: lo, t: Date.now() };
-          supabase.from('location_history').insert({ user_id: uid, lat: la, lng: lo, accuracy: ac });
+          famIds.current.forEach((fi) => addDoc(collection(db, 'families', fi, 'locs', uid, 'trail'),
+            { lat: la, lng: lo, t: serverTimestamp(), expireAt: Timestamp.fromMillis(Date.now() + 7 * 864e5) }).catch(() => {}));
         }
       },
       fallback,
@@ -112,58 +117,79 @@ export default function Home() {
   }, [sharing, awake]);
 
   useEffect(() => {
-    if (!trailUser) { setTrail([]); return; }
-    const since = new Date(Date.now() - range * 3600e3).toISOString();
-    supabase.from('location_history').select('lat,lng,recorded_at')
-      .eq('user_id', trailUser).gte('recorded_at', since).order('recorded_at').limit(2000)
-      .then(({ data }) => setTrail(data || []));
-  }, [trailUser, range]);
-
-  async function transfer(m) {
-    if (!window.confirm(`Make ${m.name} the owner? You will lose owner controls.`)) return;
-    const { error } = await supabase.rpc('transfer_ownership', { fid, new_owner: m.user_id });
-    if (error) setErr(error.message); else loadFams();
-  }
-
-  async function clearHistory() {
-    if (!window.confirm('Delete your saved route history?')) return;
-    await supabase.from('location_history').delete().eq('user_id', uid);
-    setTrail([]);
-  }
+    if (!trailUser || !fid) { setTrail([]); return; }
+    const since = Timestamp.fromMillis(Date.now() - range * 3600e3);
+    getDocs(query(collection(db, 'families', fid, 'locs', trailUser, 'trail'), where('t', '>=', since), orderBy('t'), limit(2000)))
+      .then((s) => setTrail(s.docs.map((d) => {
+        const x = d.data({ serverTimestamps: 'estimate' });
+        return { lat: x.lat, lng: x.lng, recorded_at: x.t.toDate().toISOString() };
+      })))
+      .catch((x) => setErr(x.message));
+  }, [trailUser, range, fid]);
 
   async function toggle() {
     const on = !sharing;
-    await supabase.from('members').update({ sharing: on }).eq('user_id', uid);
-    await loadFamily();
-    if (!on) { await supabase.from('locations').delete().eq('user_id', uid); setErr(''); loadFamily(); }
+    try {
+      await Promise.all(famIds.current.map((id) => updateDoc(doc(db, 'families', id, 'members', uid), { sharing: on })));
+      if (!on) { await Promise.all(famIds.current.map((id) => deleteDoc(doc(db, 'families', id, 'locs', uid)))); setErr(''); }
+    } catch (x) { setErr(x.message); }
   }
 
   async function create(e) {
     e.preventDefault();
-    const { data, error } = await supabase.rpc('create_family', { family_name: form.family, member_name: form.name });
-    if (error) return setErr(error.message);
-    setFid(data);
-    loadFams();
+    try {
+      const f = doc(collection(db, 'families'));
+      const code = newCode();
+      const b = writeBatch(db);
+      b.set(f, { name: form.family, owner: uid, inviteCode: code, createdAt: serverTimestamp() });
+      b.set(doc(f, 'members', uid), { name: form.name, sharing: false, code });
+      b.set(doc(db, 'invites', code), { fid: f.id, name: form.family });
+      b.set(doc(db, 'users', uid), { families: arrayUnion(f.id) }, { merge: true });
+      await b.commit();
+      setFid(f.id);
+      loadFams();
+    } catch (x) { setErr(x.message); }
+  }
+
+  async function transfer(m) {
+    if (!window.confirm(`Make ${m.name} the owner? You will lose owner controls.`)) return;
+    try { await updateDoc(doc(db, 'families', fid), { owner: m.uid }); } catch (x) { setErr(x.message); }
   }
 
   async function remove(userId) {
-    if (userId === uid) {
-      const { error } = await supabase.rpc('leave_family', { fid });
-      if (error) return setErr(error.message);
-      setFid(null); loadFams();
-    } else {
-      await supabase.from('members').delete().eq('family_id', fid).eq('user_id', userId);
-      loadFamily();
-    }
+    try {
+      const b = writeBatch(db);
+      if (userId === uid) {
+        if (famDoc.owner === uid) return setErr('Transfer ownership before leaving.');
+        b.set(doc(db, 'users', uid), { families: arrayRemove(fid) }, { merge: true });
+      }
+      b.delete(doc(db, 'families', fid, 'members', userId));
+      b.delete(doc(db, 'families', fid, 'locs', userId));
+      await b.commit();
+      if (userId === uid) { setFid(null); loadFams(); }
+    } catch (x) { setErr(x.message); }
   }
 
   async function rotate() {
-    const { data } = await supabase.rpc('rotate_invite', { fid });
-    if (data) setCode(data);
+    const code = newCode();
+    const b = writeBatch(db);
+    b.update(doc(db, 'families', fid), { inviteCode: code });
+    b.delete(doc(db, 'invites', famDoc.inviteCode));
+    b.set(doc(db, 'invites', code), { fid, name: famDoc.name });
+    try { await b.commit(); } catch (x) { setErr(x.message); }
   }
 
-  if (session === undefined) return null;
-  if (!session) return <main className="center"><Auth /></main>;
+  async function clearHistory() {
+    if (!window.confirm('Delete your saved route history?')) return;
+    for (const f of fams) {
+      const s = await getDocs(collection(db, 'families', f.id, 'locs', uid, 'trail'));
+      await Promise.all(s.docs.map((d) => deleteDoc(d.ref)));
+    }
+    setTrail([]);
+  }
+
+  if (user === undefined) return null;
+  if (!user) return <main className="center"><Auth /></main>;
   if (fams === null) return <main className="center">Loading…</main>;
 
   if (!fams.length) {
@@ -175,24 +201,26 @@ export default function Home() {
           <input placeholder="Your name (shown to family)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
           <button type="submit">Create family</button>
           {err && <p className="warn">{err}</p>}
-          <button type="button" className="link" onClick={() => supabase.auth.signOut()}>Sign out</button>
+          <button type="button" className="link" onClick={() => signOut(auth)}>Sign out</button>
         </form>
       </main>
     );
   }
+  if (!famDoc || famDoc.id !== fid) return <main className="center">Loading…</main>;
 
-  const fam = fams.find((f) => f.family_id === fid)?.families;
-  const isOwner = fam?.owner === uid;
-  const link = `${window.location.origin}/join/${code || fam?.invite_code}`;
-  const points = members.filter((m) => locs[m.user_id]).map((m) => ({ ...locs[m.user_id], name: m.name, me: m.user_id === uid }));
+  const isOwner = famDoc.owner === uid;
+  const link = `${window.location.origin}/join/${famDoc.inviteCode}`;
+  const points = members.filter((m) => locs[m.uid]).map((m) => ({
+    ...locs[m.uid], updated_at: locs[m.uid].updatedAt?.toDate?.(), name: m.name, me: m.uid === uid,
+  }));
 
   return (
     <div className="app">
       <aside>
-        <h1>{fam?.name}</h1>
+        <h1>{famDoc.name}</h1>
         {fams.length > 1 && (
           <select value={fid || ''} onChange={(e) => setFid(e.target.value)}>
-            {fams.map((f) => <option key={f.family_id} value={f.family_id}>{f.families.name}</option>)}
+            {fams.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
           </select>
         )}
         <button className={sharing ? 'on' : ''} onClick={toggle}>
@@ -207,17 +235,19 @@ export default function Home() {
         {err && <p className="warn">{err}</p>}
         <ul>
           {members.map((m) => {
-            const l = locs[m.user_id];
+            const l = locs[m.uid];
             return (
-              <li key={m.user_id}>
+              <li key={m.uid}>
                 <div>
-                  <b>{m.name}{m.user_id === uid ? ' (you)' : ''}</b>
-                  <span>{!m.sharing ? 'Not sharing' : !l ? 'Waiting for location…' : `${ago(l.updated_at)} · ${l.source === 'ip' ? 'approximate' : `±${Math.round(l.accuracy)} m`}`}</span>
+                  <b>{m.name}{m.uid === uid ? ' (you)' : ''}{m.uid === famDoc.owner ? ' ★' : ''}</b>
+                  <span>{!m.sharing ? 'Not sharing' : !l ? 'Waiting for location…' : `${ago(l.updatedAt?.toDate?.() ?? Date.now())} · ${l.source === 'ip' ? 'approximate' : `±${Math.round(l.accuracy)} m`}`}</span>
                 </div>
                 <div className="acts">
-                  {m.sharing && <button className="link" onClick={() => setTrailUser(trailUser === m.user_id ? null : m.user_id)}>{trailUser === m.user_id ? 'Hide trail' : 'Trail'}</button>}
-                  {isOwner && m.user_id !== uid && <button className="link" onClick={() => transfer(m)}>Make owner</button>}
-                  {(isOwner || m.user_id === uid) && <button className="link" onClick={() => remove(m.user_id)}>{m.user_id === uid ? 'Leave' : 'Remove'}</button>}
+                  {m.sharing && <button className="link" onClick={() => setTrailUser(trailUser === m.uid ? null : m.uid)}>{trailUser === m.uid ? 'Hide trail' : 'Trail'}</button>}
+                  {isOwner && m.uid !== uid && <button className="link" onClick={() => transfer(m)}>Make owner</button>}
+                  {((isOwner && m.uid !== uid) || (m.uid === uid && !isOwner)) && (
+                    <button className="link" onClick={() => remove(m.uid)}>{m.uid === uid ? 'Leave' : 'Remove'}</button>
+                  )}
                 </div>
               </li>
             );
@@ -242,7 +272,7 @@ export default function Home() {
             </div>
           </div>
         )}
-        <button className="link" onClick={() => supabase.auth.signOut()}>Sign out</button>
+        <button className="link" onClick={() => signOut(auth)}>Sign out</button>
         <button className="link" onClick={clearHistory}>Delete my route history</button>
       </aside>
       <section><LiveMap points={points} trail={trail} /></section>

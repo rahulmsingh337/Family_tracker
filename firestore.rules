@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null; }
+    function fpath(fid) { return /databases/$(db)/documents/families/$(fid); }
+    function isMember(fid) { return signedIn() && exists(/databases/$(db)/documents/families/$(fid)/members/$(request.auth.uid)); }
+    function isOwner(fid) { return signedIn() && get(fpath(fid)).data.owner == request.auth.uid; }
+    function isOwnerAfter(fid) { return signedIn() && getAfter(fpath(fid)).data.owner == request.auth.uid; }
+    function mySharing(fid) { return get(/databases/$(db)/documents/families/$(fid)/members/$(request.auth.uid)).data.sharing == true; }
+    function sharing(fid, u) { return get(/databases/$(db)/documents/families/$(fid)/locs/$(u)).data.sharing == true; }
+
+    match /users/{u} {
+      allow read, write: if signedIn() && request.auth.uid == u;
+    }
+
+    // Invite lookup by exact code only (no listing).
+    match /invites/{code} {
+      allow get: if signedIn();
+      allow create: if isOwnerAfter(request.resource.data.fid);
+      allow delete: if isOwner(resource.data.fid);
+    }
+
+    match /families/{fid} {
+      allow read: if isMember(fid);
+      allow create: if signedIn() && request.resource.data.owner == request.auth.uid;
+      // Owner may rotate the invite code or hand ownership to an existing member.
+      allow update: if isOwner(fid) && (request.resource.data.owner == resource.data.owner
+        || exists(/databases/$(db)/documents/families/$(fid)/members/$(request.resource.data.owner)));
+
+      match /members/{u} {
+        allow read: if isMember(fid);
+        allow create: if signedIn() && u == request.auth.uid
+          && (isOwnerAfter(fid) || request.resource.data.code == get(fpath(fid)).data.inviteCode);
+        allow update: if signedIn() && u == request.auth.uid;
+        // Owner can't leave (must transfer first); owner can remove others.
+        allow delete: if signedIn() && ((u == request.auth.uid && !isOwner(fid)) || (isOwner(fid) && u != request.auth.uid));
+      }
+
+      // Latest position. `sharing: true` is what makes it visible to others.
+      match /locs/{u} {
+        allow read: if isMember(fid) && (u == request.auth.uid || resource.data.sharing == true);
+        allow create, update: if isMember(fid) && u == request.auth.uid && mySharing(fid);
+        allow delete: if signedIn() && (u == request.auth.uid || isOwner(fid));
+
+        // Route history. Expire via Firestore TTL policy on `expireAt`.
+        match /trail/{tid} {
+          allow read: if isMember(fid) && (u == request.auth.uid || sharing(fid, u));
+          allow create: if isMember(fid) && u == request.auth.uid && mySharing(fid);
+          allow delete: if signedIn() && u == request.auth.uid;
+        }
+      }
+    }
+  }
+}
